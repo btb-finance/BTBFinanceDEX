@@ -168,8 +168,8 @@ contract Voter is IVoter, ReentrancyGuard {
         address token0 = _getToken0(pool);
         address token1 = _getToken1(pool);
         
-        if (!_isWhitelistedToken[token0] && !_isWhitelistedToken[token1]) {
-            revert NotWhitelisted(); // At least one token must be whitelisted
+        if (!_isWhitelistedToken[token0] || !_isWhitelistedToken[token1]) {
+            revert NotWhitelisted(); // BOTH tokens must be whitelisted
         }
 
         gauge = address(new Gauge(pool, rewardToken, address(this)));
