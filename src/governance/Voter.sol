@@ -159,8 +159,18 @@ contract Voter is IVoter, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IVoter
+    /// @notice Anyone can create a gauge for any pool where BOTH tokens are whitelisted
     function createGauge(address pool) external override returns (address gauge) {
+        // Check gauge doesn't already exist
         if (_gauges[pool] != address(0)) revert NotWhitelisted();
+
+        // Get pool tokens and verify both are whitelisted
+        address token0 = _getToken0(pool);
+        address token1 = _getToken1(pool);
+        
+        if (!_isWhitelistedToken[token0] && !_isWhitelistedToken[token1]) {
+            revert NotWhitelisted(); // At least one token must be whitelisted
+        }
 
         gauge = address(new Gauge(pool, rewardToken, address(this)));
 
@@ -372,5 +382,20 @@ contract Voter is IVoter, ReentrancyGuard {
 
     function _epochStart(uint256 timestamp) internal pure returns (uint256) {
         return (timestamp / WEEK) * WEEK;
+    }
+
+    /// @dev Get token0 from a pool (works for both V2 and CL pools)
+    function _getToken0(address pool) internal view returns (address) {
+        // Both Pool and CLPool have token0() function
+        (bool success, bytes memory data) = pool.staticcall(abi.encodeWithSignature("token0()"));
+        require(success && data.length >= 32, "Invalid pool");
+        return abi.decode(data, (address));
+    }
+
+    /// @dev Get token1 from a pool (works for both V2 and CL pools)
+    function _getToken1(address pool) internal view returns (address) {
+        (bool success, bytes memory data) = pool.staticcall(abi.encodeWithSignature("token1()"));
+        require(success && data.length >= 32, "Invalid pool");
+        return abi.decode(data, (address));
     }
 }
