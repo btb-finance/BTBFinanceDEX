@@ -49,6 +49,30 @@ library LiquidityMath {
         return FullMath.mulDiv(liquidity, sqrtRatioBX96 - sqrtRatioAX96, 1 << 96);
     }
 
+    /// @notice Computes liquidity from amounts given current and range prices
+    function getLiquidityForAmounts(
+        uint160 sqrtPriceX96,
+        uint160 sqrtRatioAX96,
+        uint160 sqrtRatioBX96,
+        uint256 amount0,
+        uint256 amount1
+    ) internal pure returns (uint128 liquidity) {
+        if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+
+        if (sqrtPriceX96 <= sqrtRatioAX96) {
+            // Current price below range - only token0
+            liquidity = getLiquidityForAmount0(sqrtRatioAX96, sqrtRatioBX96, amount0);
+        } else if (sqrtPriceX96 < sqrtRatioBX96) {
+            // Current price in range - both tokens
+            uint128 liquidity0 = getLiquidityForAmount0(sqrtPriceX96, sqrtRatioBX96, amount0);
+            uint128 liquidity1 = getLiquidityForAmount1(sqrtRatioAX96, sqrtPriceX96, amount1);
+            liquidity = liquidity0 < liquidity1 ? liquidity0 : liquidity1;
+        } else {
+            // Current price above range - only token1
+            liquidity = getLiquidityForAmount1(sqrtRatioAX96, sqrtRatioBX96, amount1);
+        }
+    }
+
     /// @notice Safe addition for liquidity
     function addDelta(uint128 x, int128 y) internal pure returns (uint128 z) {
         if (y < 0) {
