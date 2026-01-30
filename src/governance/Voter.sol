@@ -6,13 +6,11 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IVoter} from "../interfaces/IVoter.sol";
 import {IVotingEscrow} from "../interfaces/IVotingEscrow.sol";
-import {IGauge} from "../interfaces/IGauge.sol";
-import {IPool} from "../interfaces/IPool.sol";
 
 /// @title BTB Finance Voter
 /// @author BTB Finance
 /// @notice Personal emissions voting - each veNFT distributes its own BTB budget instantly
-/// @dev No epochs, no weekly system. Vote = instant reward distribution.
+/// @dev No epochs, no weekly system, no gauge registration. Vote = instant reward to any pool.
 contract Voter is IVoter, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -20,7 +18,6 @@ contract Voter is IVoter, ReentrancyGuard {
                                 CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    uint256 internal constant WEEK = 7 days;
     uint256 internal constant MAX_POOLS = 30;
 
     /*//////////////////////////////////////////////////////////////
@@ -39,13 +36,7 @@ contract Voter is IVoter, ReentrancyGuard {
     /// @inheritdoc IVoter
     uint256 public override totalWeight;
 
-    /// @dev Pool => Is valid gauge (pool is its own gauge)
-    mapping(address => bool) internal _isGauge;
-
-    /// @dev Pool => Is alive
-    mapping(address => bool) internal _isAlive;
-
-    /// @dev Pool => Total votes (for display)
+    /// @dev Pool => Total votes (for stats only)
     mapping(address => uint256) internal _weights;
 
     /// @dev Token ID => Pool => Votes
@@ -56,9 +47,6 @@ contract Voter is IVoter, ReentrancyGuard {
 
     /// @dev Token ID => Pools voted for
     mapping(uint256 => address[]) internal _poolVote;
-
-    /// @dev All pools with gauges
-    address[] internal _allPools;
 
     /// @dev Pool => Total BTB received (for stats)
     mapping(address => uint256) public totalRewards;
@@ -78,23 +66,26 @@ contract Voter is IVoter, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IVoter
-    function gauges(address pool) external view override returns (address) {
-        return _isGauge[pool] ? pool : address(0);
+    /// @dev Every pool is its own gauge - no registration needed
+    function gauges(address pool) external pure override returns (address) {
+        return pool;
     }
 
     /// @inheritdoc IVoter
-    function poolForGauge(address gauge) external view override returns (address) {
-        return _isGauge[gauge] ? gauge : address(0);
+    function poolForGauge(address gauge) external pure override returns (address) {
+        return gauge;
     }
 
     /// @inheritdoc IVoter
-    function isGauge(address gauge) external view override returns (bool) {
-        return _isGauge[gauge];
+    /// @dev All pools are gauges by definition
+    function isGauge(address) external pure override returns (bool) {
+        return true; // Any address can receive votes
     }
 
     /// @inheritdoc IVoter
-    function isAlive(address gauge) external view override returns (bool) {
-        return _isAlive[gauge];
+    /// @dev All pools are alive by default (no kill mechanism needed for simple system)
+    function isAlive(address) external pure override returns (bool) {
+        return true;
     }
 
     /// @inheritdoc IVoter
@@ -113,58 +104,18 @@ contract Voter is IVoter, ReentrancyGuard {
     }
 
     /// @inheritdoc IVoter
-    function isWhitelistedToken(address token) external pure override returns (bool) {
-        return true; // No whitelisting - permissionless
+    function isWhitelistedToken(address) external pure override returns (bool) {
+        return true; // No whitelisting - fully permissionless
     }
 
     /// @inheritdoc IVoter
-    function poolsLength() external view override returns (uint256) {
-        return _allPools.length;
+    function poolsLength() external pure override returns (uint256) {
+        return 0; // Not tracking - any pool is valid
     }
 
     /// @inheritdoc IVoter
-    function allPools(uint256 index_) external view override returns (address) {
-        return _allPools[index_];
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                            GAUGE MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @inheritdoc IVoter
-    /// @notice Anyone can create a gauge for any pool - permissionless!
-    function createGauge(address pool) external override returns (address gauge) {
-        // Check gauge doesn't already exist
-        if (_isGauge[pool]) revert NotGauge();
-
-        // Verify it's a valid pool with token0/token1
-        (bool success0, ) = pool.staticcall(abi.encodeWithSignature("token0()"));
-        (bool success1, ) = pool.staticcall(abi.encodeWithSignature("token1()"));
-        if (!success0 || !success1) revert NotWhitelisted();
-
-        // Pool is its own gauge
-        _isGauge[pool] = true;
-        _isAlive[pool] = true;
-        _allPools.push(pool);
-
-        emit GaugeCreated(pool, pool, msg.sender);
-        return pool;
-    }
-
-    /// @inheritdoc IVoter
-    function killGauge(address gauge) external override {
-        if (msg.sender != governor) revert NotGovernor();
-        if (!_isAlive[gauge]) revert PoolNotAlive();
-        _isAlive[gauge] = false;
-        emit GaugeKilled(gauge);
-    }
-
-    /// @inheritdoc IVoter
-    function reviveGauge(address gauge) external override {
-        if (msg.sender != governor) revert NotGovernor();
-        if (_isAlive[gauge]) revert PoolNotAlive();
-        _isAlive[gauge] = true;
-        emit GaugeRevived(gauge);
+    function allPools(uint256) external pure override returns (address) {
+        return address(0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -172,7 +123,7 @@ contract Voter is IVoter, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IVoter
-    /// @notice Vote and INSTANTLY distribute your veNFT's BTB emissions to pools
+    /// @notice Vote and INSTANTLY distribute your veNFT's BTB emissions to ANY pool
     function vote(uint256 tokenId, address[] calldata pools, uint256[] calldata weights_) external override nonReentrant {
         if (!IVotingEscrow(ve).isApprovedOrOwner(msg.sender, tokenId)) revert NotApprovedOrOwner();
         if (pools.length != weights_.length) revert InvalidWeights();
@@ -186,7 +137,7 @@ contract Voter is IVoter, ReentrancyGuard {
         if (votingPower == 0) revert NotWhitelisted();
         if (emissionBudget == 0) revert ZeroAmount();
 
-        // Reset previous votes and return any unspent emissions
+        // Reset previous votes (allows changing vote distribution)
         _reset(tokenId);
 
         // Calculate total weight
@@ -196,24 +147,19 @@ contract Voter is IVoter, ReentrancyGuard {
         }
         if (totalVoteWeight == 0) revert InvalidWeights();
 
-        // Distribute emissions proportionally
+        // Distribute emissions proportionally to ANY pools
         uint256 usedEmissions = 0;
         
         for (uint256 i = 0; i < pools.length; i++) {
             address pool = pools[i];
-            
-            // Check pool has a gauge and is alive
-            if (!_isGauge[pool]) {
-                // Auto-create gauge if needed
-                createGauge(pool);
-            }
-            if (!_isAlive[pool]) continue;
+            if (pool == address(0)) continue;
 
             // Calculate this pool's share of emissions
             uint256 poolEmission = (emissionBudget * weights_[i]) / totalVoteWeight;
             
             if (poolEmission > 0) {
                 // INSTANTLY transfer BTB from veNFT to pool
+                // Pool receives BTB and distributes to LP holders
                 IVotingEscrow(ve).distributeEmission(tokenId, pool, poolEmission);
                 
                 // Track votes for stats/display
@@ -295,12 +241,31 @@ contract Voter is IVoter, ReentrancyGuard {
     }
 
     /*//////////////////////////////////////////////////////////////
-                               ADMIN
+                               ADMIN (Minimal)
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Set governor for emergency functions (if needed in future)
     function setGovernor(address _governor) external {
         if (msg.sender != governor) revert NotGovernor();
         if (_governor == address(0)) revert ZeroAddress();
         governor = _governor;
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev Deprecated - no gauge creation needed, all pools are gauges
+    function createGauge(address) external pure override returns (address) {
+        return address(0); // No-op: every pool is already a gauge
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev Deprecated - no kill mechanism in simple system
+    function killGauge(address) external pure override {
+        // No-op: all pools are always alive
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev Deprecated - no revive needed
+    function reviveGauge(address) external pure override {
+        // No-op
     }
 }
