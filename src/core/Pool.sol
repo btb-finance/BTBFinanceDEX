@@ -393,7 +393,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
                           FLASH LOAN
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IPool
     /// @notice Flash loan - borrow tokens without collateral, must repay + fee in same tx
     /// @param token0Amount Amount of token0 to borrow
     /// @param token1Amount Amount of token1 to borrow

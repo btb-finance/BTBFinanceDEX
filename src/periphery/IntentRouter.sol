@@ -4,6 +4,7 @@ pragma solidity 0.8.27;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {PoolManager} from "../core/PoolManager.sol";
 import {MEVProtectedPoolManager} from "../core/MEVProtectedPoolManager.sol";
 import {ReCLAMMPoolManager} from "../core/ReCLAMMPoolManager.sol";
 
@@ -121,12 +122,12 @@ contract IntentRouter is ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     constructor(
-        address payable _poolManager,
-        address payable _reclammManager,
+        address _poolManager,
+        address _reclammManager,
         address _feeRecipient
     ) {
-        poolManager = MEVProtectedPoolManager(_poolManager);
-        reclammManager = ReCLAMMPoolManager(_reclammManager);
+        poolManager = MEVProtectedPoolManager(payable(_poolManager));
+        reclammManager = ReCLAMMPoolManager(payable(_reclammManager));
         feeRecipient = _feeRecipient;
         owner = msg.sender;
     }
@@ -231,7 +232,7 @@ contract IntentRouter is ReentrancyGuard {
             : _findBestPool(intent.tokenIn, intent.tokenOut);
 
         // Queue swap for MEV protection
-        MEVProtectedPoolManager.SwapParams memory params = MEVProtectedPoolManager.SwapParams({
+        PoolManager.SwapParams memory params = PoolManager.SwapParams({
             zeroForOne: intent.tokenIn < intent.tokenOut,
             amountSpecified: int256(intent.amountIn),
             sqrtPriceLimitX96: 0 // No limit
