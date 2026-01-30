@@ -3,6 +3,7 @@ pragma solidity 0.8.27;
 
 /// @title IPool Interface
 /// @notice Interface for BTB Finance V2-style AMM pools (volatile/stable)
+/// @dev All trading fees go to veBTB holders, not LP holders
 interface IPool {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -18,8 +19,6 @@ interface IPool {
     error NotFactory();
     error Locked();
     error SlippageExceeded();
-    error FlashLoanCallbackFailed();
-    error FlashLoanNotRepaid();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -36,9 +35,7 @@ interface IPool {
         address indexed to
     );
     event Sync(uint112 reserve0, uint112 reserve1);
-    event Fees(address indexed sender, uint256 amount0, uint256 amount1);
-    event Claim(address indexed sender, address indexed recipient, uint256 amount0, uint256 amount1);
-    event FlashLoan(address indexed receiver, uint256 token0Amount, uint256 token1Amount, uint256 fee0, uint256 fee1);
+    event FeesDistributed(uint256 amount0, uint256 amount1);
 
     /*//////////////////////////////////////////////////////////////
                                VIEW FUNCTIONS
@@ -71,10 +68,6 @@ interface IPool {
     /// @notice Get the current K value
     function getK() external view returns (uint256);
 
-    /// @notice Claimable fees for LP holder
-    function claimable0(address account) external view returns (uint256);
-    function claimable1(address account) external view returns (uint256);
-
     /*//////////////////////////////////////////////////////////////
                              WRITE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -106,8 +99,12 @@ interface IPool {
     /// @notice Skim excess tokens
     function skim(address to) external;
 
-    /// @notice Claim accumulated trading fees
-    function claimFees() external returns (uint256 claimed0, uint256 claimed1);
+    /// @notice Distribute accumulated fees to veBTB holders (anyone can call)
+    function distributeFees() external;
+
+    /// @notice Get accumulated fees waiting to be distributed
+    function pendingFees0() external view returns (uint256);
+    function pendingFees1() external view returns (uint256);
 
     /// @notice Receive BTB rewards from voter when pool receives votes
     function notifyRewardAmount(uint256 amount) external;

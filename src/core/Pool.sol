@@ -5,15 +5,14 @@ import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IPool, IPoolCallee, IFeeDistributor} from "../interfaces/IPool.sol";
+import {IPool} from "../interfaces/IPool.sol";
 import {IPoolFactory} from "../interfaces/IPoolFactory.sol";
-import {IFlashLoanReceiver} from "../interfaces/IFlashLoanReceiver.sol";
 import {Math} from "../libraries/Math.sol";
 
 /// @title BTB Finance Pool
 /// @author BTB Finance
-/// @notice V2-style AMM pool with integrated BTB rewards. Voting = instant rewards.
-/// @dev LP holders earn: 1) Trading fees (token0/token1), 2) BTB emissions (via voting)
+/// @notice V2-style AMM pool. All trading fees go to veBTB holders.
+/// @dev LP holders earn BTB rewards via voting, NOT trading fees.
 contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -42,17 +41,9 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     uint256 public price0CumulativeLast;
     uint256 public price1CumulativeLast;
 
-    // Trading fee tracking per LP (token0/token1)
-    uint256 public index0;
-    uint256 public index1;
-    mapping(address => uint256) public supplyIndex0;
-    mapping(address => uint256) public supplyIndex1;
-    mapping(address => uint256) public override claimable0;
-    mapping(address => uint256) public override claimable1;
-
-    // Fee accumulator
-    uint256 internal fees0;
-    uint256 internal fees1;
+    // Fee accumulators - ALL fees go to veBTB holders
+    uint256 public fees0;
+    uint256 public fees1;
 
     // Last K for stable pools
     uint256 internal _reserve0Last;
@@ -62,12 +53,12 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     uint256 internal immutable decimals0;
     uint256 internal immutable decimals1;
 
-    // BTB reward tracking
-    address public rewardToken; // BTB token address
-    uint256 public rewardIndex; // Global BTB per LP token
-    mapping(address => uint256) public supplyRewardIndex; // Per user index
-    mapping(address => uint256) public claimableReward; // BTB rewards owed
-    uint256 public totalBTBRewards; // Total BTB received
+    // BTB reward tracking - LP holders earn this via voting
+    address public rewardToken;
+    uint256 public rewardIndex;
+    mapping(address => uint256) public supplyRewardIndex;
+    mapping(address => uint256) public claimableReward;
+    uint256 public totalBTBRewards;
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -83,7 +74,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
                                INITIALIZER
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IPool
     function initialize(address _token0, address _token1, bool _stable) external override initializer {
         __ERC20_init(
             string.concat("BTB Finance ", _stable ? "sAMM" : "vAMM", " - ", _getSymbol(_token0), "/", _getSymbol(_token1)),
@@ -94,16 +84,12 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         token0 = _token0;
         token1 = _token1;
         stable = _stable;
-        
-        // Get BTB reward token from factory
-        rewardToken = IPoolFactory(factory).voter(); // Voter has rewardToken
     }
 
     /*//////////////////////////////////////////////////////////////
                              VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IPool
     function getReserves()
         public
         view
@@ -113,7 +99,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         return (reserve0, reserve1, blockTimestampLast);
     }
 
-    /// @inheritdoc IPool
     function getAmountOut(uint256 amountIn, address tokenIn) external view override returns (uint256 amountOut) {
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         amountIn -= (amountIn * IPoolFactory(factory).getFee(address(this), stable)) / 10_000;
@@ -136,14 +121,21 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         }
     }
 
-    /// @inheritdoc IPool
     function getK() external view override returns (uint256) {
         return _k(reserve0, reserve1);
     }
 
-    /// @inheritdoc IPool
     function observationLength() external pure override returns (uint256) {
         return 1;
+    }
+
+    /// @notice Get accumulated fees waiting to be distributed to veBTB
+    function pendingFees0() external view override returns (uint256) {
+        return fees0;
+    }
+
+    function pendingFees1() external view override returns (uint256) {
+        return fees1;
     }
 
     /// @notice Get pending BTB rewards for an account
@@ -159,7 +151,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
                             LIQUIDITY FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IPool
     function mint(address to) external override nonReentrant returns (uint256 liquidity) {
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         uint256 balance0 = IERC20(token0).balanceOf(address(this));
@@ -167,7 +158,7 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         uint256 amount0 = balance0 - _reserve0;
         uint256 amount1 = balance1 - _reserve1;
 
-        _updateFees(to);
+        _updateReward(to);
 
         uint256 _totalSupply = totalSupply();
         if (_totalSupply == 0) {
@@ -184,7 +175,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         emit Mint(msg.sender, amount0, amount1);
     }
 
-    /// @inheritdoc IPool
     function burn(address to) external override nonReentrant returns (uint256 amount0, uint256 amount1) {
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         address _token0 = token0;
@@ -193,7 +183,7 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         uint256 balance1 = IERC20(_token1).balanceOf(address(this));
         uint256 liquidity = balanceOf(address(this));
 
-        _updateFees(to);
+        _updateReward(to);
 
         uint256 _totalSupply = totalSupply();
         amount0 = (liquidity * balance0) / _totalSupply;
@@ -215,7 +205,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
                             SWAP FUNCTION
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IPool
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata) external override nonReentrant {
         if (amount0Out == 0 && amount1Out == 0) revert InsufficientOutputAmount();
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
@@ -253,8 +242,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
-    /// @inheritdoc IPool
-    /// @notice Swap with slippage protection - reverts if output is less than minOutput
     function swapWithSlippage(
         uint256 amount0Out,
         uint256 amount1Out,
@@ -262,7 +249,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         address to,
         bytes calldata data
     ) external override nonReentrant {
-        // Determine which token is being output
         uint256 actualOutput;
         if (amount0Out > 0) {
             actualOutput = amount0Out;
@@ -270,91 +256,37 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
             actualOutput = amount1Out;
         }
         
-        // Check slippage
         if (actualOutput < minOutput) revert SlippageExceeded();
-        
-        // Execute swap directly
-        _executeSwap(amount0Out, amount1Out, to, data);
-    }
-
-    /// @dev Internal swap implementation
-    function _executeSwap(
-        uint256 amount0Out,
-        uint256 amount1Out,
-        address to,
-        bytes calldata data
-    ) internal {
-        // Same implementation as swap() but internal
-        if (amount0Out == 0 && amount1Out == 0) revert InsufficientOutputAmount();
-        (uint112 _reserve0, uint112 _reserve1,) = getReserves();
-        if (amount0Out >= _reserve0 || amount1Out >= _reserve1) revert InsufficientLiquidity();
-        if (to == token0 || to == token1) revert InvalidTo();
-
-        if (amount0Out > 0) IERC20(token0).safeTransfer(to, amount0Out);
-        if (amount1Out > 0) IERC20(token1).safeTransfer(to, amount1Out);
-        if (data.length > 0) IPoolCallee(to).poolCall(msg.sender, amount0Out, amount1Out, data);
-
-        uint256 balance0 = IERC20(token0).balanceOf(address(this));
-        uint256 balance1 = IERC20(token1).balanceOf(address(this));
-
-        uint256 amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
-        uint256 amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
-        if (amount0In == 0 && amount1In == 0) revert InsufficientInputAmount();
-
-        {
-            uint256 fee = IPoolFactory(factory).getFee(address(this), stable);
-            if (amount0In > 0) {
-                uint256 fee0 = (amount0In * fee) / 10_000;
-                fees0 += fee0;
-            }
-            if (amount1In > 0) {
-                uint256 fee1 = (amount1In * fee) / 10_000;
-                fees1 += fee1;
-            }
-        }
-
-        uint256 balance0Adjusted = balance0 - fees0;
-        uint256 balance1Adjusted = balance1 - fees1;
-        if (_k(balance0Adjusted, balance1Adjusted) < _k(_reserve0, _reserve1)) revert K();
-
-        _update(balance0, balance1, _reserve0, _reserve1);
-        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+        swap(amount0Out, amount1Out, to, data);
     }
 
     /*//////////////////////////////////////////////////////////////
-                            FEE FUNCTIONS
+                         FEE DISTRIBUTION
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IPool
-    /// @notice DEPRECATED: Fees now go 100% to veBTB holders via FeeDistributor
-    /// @dev Left for interface compatibility - actual fee distribution handled by distributeFeesToVeBTB
-    function claimFees() external override returns (uint256 claimed0, uint256 claimed1) {
-        // Trading fees now go entirely to veBTB holders through FeeDistributor
-        // This function returns 0 as fees are no longer kept in the pool for LPs
-        return (0, 0);
-    }
+    /// @notice Distribute ALL accumulated fees to veBTB holders
+    /// @dev Anyone can call this. Fees go to VotingEscrow for distribution.
+    function distributeFees() external override nonReentrant {
+        uint256 fees0ToSend = fees0;
+        uint256 fees1ToSend = fees1;
 
-    /// @notice Distribute accumulated trading fees to veBTB holders
-    /// @param feeDistributor Address of the FeeDistributor contract
-    /// @dev Can be called by anyone to trigger distribution
-    function distributeFeesToVeBTB(address feeDistributor) external nonReentrant {
-        uint256 fees0ToDistribute = fees0;
-        uint256 fees1ToDistribute = fees1;
-
-        if (fees0ToDistribute > 0) {
+        if (fees0ToSend > 0) {
             fees0 = 0;
-            IERC20(token0).safeTransfer(feeDistributor, fees0ToDistribute);
-            IFeeDistributor(feeDistributor).collectFees(token0, fees0ToDistribute);
+            // Send to VotingEscrow - fees become part of veBTB holder rewards
+            address ve = IPoolFactory(factory).voter(); // Voter knows the ve contract
+            IERC20(token0).safeTransfer(ve, fees0ToSend);
         }
 
-        if (fees1ToDistribute > 0) {
+        if (fees1ToSend > 0) {
             fees1 = 0;
-            IERC20(token1).safeTransfer(feeDistributor, fees1ToDistribute);
-            IFeeDistributor(feeDistributor).collectFees(token1, fees1ToDistribute);
+            address ve = IPoolFactory(factory).voter();
+            IERC20(token1).safeTransfer(ve, fees1ToSend);
         }
+
+        emit FeesDistributed(fees0ToSend, fees1ToSend);
     }
 
-    /// @notice Claim BTB rewards
+    /// @notice Claim BTB rewards (earned via voting, NOT from trading fees)
     function claimReward() external nonReentrant returns (uint256) {
         _updateReward(msg.sender);
 
@@ -369,13 +301,10 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
 
     /// @notice Receive BTB from VotingEscrow when someone votes for this pool
     function notifyRewardAmount(uint256 amount) external {
-        // Only accept from VotingEscrow via Voter
         require(msg.sender == IPoolFactory(factory).voter(), "Not voter");
         
         if (amount == 0) return;
         
-        // BTB is transferred to this contract by VotingEscrow
-        // Update global reward index
         uint256 _totalSupply = totalSupply();
         if (_totalSupply > 0) {
             rewardIndex += (amount * PRECISION) / _totalSupply;
@@ -388,66 +317,13 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
                           MAINTENANCE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IPool
     function sync() external override nonReentrant {
         _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)), reserve0, reserve1);
     }
 
-    /// @inheritdoc IPool
     function skim(address to) external override nonReentrant {
         IERC20(token0).safeTransfer(to, IERC20(token0).balanceOf(address(this)) - reserve0);
         IERC20(token1).safeTransfer(to, IERC20(token1).balanceOf(address(this)) - reserve1);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                          FLASH LOAN
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Flash loan - borrow tokens without collateral, must repay + fee in same tx
-    /// @param token0Amount Amount of token0 to borrow
-    /// @param token1Amount Amount of token1 to borrow
-    /// @param receiver Address to receive flash loan callback
-    /// @param data Arbitrary data to pass to receiver
-    function flash(uint256 token0Amount, uint256 token1Amount, address receiver, bytes calldata data) external nonReentrant {
-        if (token0Amount == 0 && token1Amount == 0) revert InsufficientOutputAmount();
-        if (token0Amount >= reserve0 || token1Amount >= reserve1) revert InsufficientLiquidity();
-
-        // Flash loan fee: 0.05% (5 basis points)
-        uint256 FLASH_LOAN_FEE = 5;
-        uint256 fee0 = (token0Amount * FLASH_LOAN_FEE) / 10000;
-        uint256 fee1 = (token1Amount * FLASH_LOAN_FEE) / 10000;
-
-        // Track balances before loan
-        uint256 balance0Before = IERC20(token0).balanceOf(address(this));
-        uint256 balance1Before = IERC20(token1).balanceOf(address(this));
-
-        // Transfer tokens to receiver
-        if (token0Amount > 0) IERC20(token0).safeTransfer(receiver, token0Amount);
-        if (token1Amount > 0) IERC20(token1).safeTransfer(receiver, token1Amount);
-
-        // Call receiver callback
-        IFlashLoanReceiver(receiver).onFlashLoan(
-            msg.sender,
-            token0Amount,
-            token1Amount,
-            fee0,
-            fee1,
-            data
-        );
-
-        // Verify repayment + fee
-        uint256 balance0After = IERC20(token0).balanceOf(address(this));
-        uint256 balance1After = IERC20(token1).balanceOf(address(this));
-
-        // Must repay at least borrowed amount + fee
-        if (token0Amount > 0 && balance0After < balance0Before + fee0) revert FlashLoanNotRepaid();
-        if (token1Amount > 0 && balance1After < balance1Before + fee1) revert FlashLoanNotRepaid();
-
-        // Accrue flash loan fees to LP holders
-        if (fee0 > 0) fees0 += fee0;
-        if (fee1 > 0) fees1 += fee1;
-
-        emit FlashLoan(receiver, token0Amount, token1Amount, fee0, fee1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -468,22 +344,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         reserve1 = uint112(balance1);
         blockTimestampLast = blockTimestamp;
         emit Sync(reserve0, reserve1);
-    }
-
-    function _updateFees(address account) internal {
-        uint256 _supplied = balanceOf(account);
-        if (_supplied > 0) {
-            uint256 _delta0 = index0 - supplyIndex0[account];
-            uint256 _delta1 = index1 - supplyIndex1[account];
-            if (_delta0 > 0) {
-                claimable0[account] += (_supplied * _delta0) / PRECISION;
-            }
-            if (_delta1 > 0) {
-                claimable1[account] += (_supplied * _delta1) / PRECISION;
-            }
-        }
-        supplyIndex0[account] = index0;
-        supplyIndex1[account] = index1;
     }
 
     function _updateReward(address account) internal {
@@ -543,14 +403,8 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         return success ? abi.decode(data, (string)) : "???";
     }
 
-    /*//////////////////////////////////////////////////////////////
-                              ERC20 HOOKS
-    //////////////////////////////////////////////////////////////*/
-
     function _update(address from, address to, uint256 value) internal override {
-        _updateFees(from);
-        _updateFees(to);
-        _updateReward(from); // Auto-accrue BTB rewards
+        _updateReward(from);
         _updateReward(to);
         super._update(from, to, value);
     }
