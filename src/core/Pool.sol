@@ -5,7 +5,7 @@ import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IPool, IPoolCallee} from "../interfaces/IPool.sol";
+import {IPool, IPoolCallee, IFeeDistributor} from "../interfaces/IPool.sol";
 import {IPoolFactory} from "../interfaces/IPoolFactory.sol";
 import {IFlashLoanReceiver} from "../interfaces/IFlashLoanReceiver.sol";
 import {Math} from "../libraries/Math.sol";
@@ -326,22 +326,32 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IPool
+    /// @notice DEPRECATED: Fees now go 100% to veBTB holders via FeeDistributor
+    /// @dev Left for interface compatibility - actual fee distribution handled by distributeFeesToVeBTB
     function claimFees() external override returns (uint256 claimed0, uint256 claimed1) {
-        _updateFees(msg.sender);
+        // Trading fees now go entirely to veBTB holders through FeeDistributor
+        // This function returns 0 as fees are no longer kept in the pool for LPs
+        return (0, 0);
+    }
 
-        claimed0 = claimable0[msg.sender];
-        claimed1 = claimable1[msg.sender];
+    /// @notice Distribute accumulated trading fees to veBTB holders
+    /// @param feeDistributor Address of the FeeDistributor contract
+    /// @dev Can be called by anyone to trigger distribution
+    function distributeFeesToVeBTB(address feeDistributor) external nonReentrant {
+        uint256 fees0ToDistribute = fees0;
+        uint256 fees1ToDistribute = fees1;
 
-        if (claimed0 > 0) {
-            claimable0[msg.sender] = 0;
-            IERC20(token0).safeTransfer(msg.sender, claimed0);
+        if (fees0ToDistribute > 0) {
+            fees0 = 0;
+            IERC20(token0).safeTransfer(feeDistributor, fees0ToDistribute);
+            IFeeDistributor(feeDistributor).collectFees(token0, fees0ToDistribute);
         }
-        if (claimed1 > 0) {
-            claimable1[msg.sender] = 0;
-            IERC20(token1).safeTransfer(msg.sender, claimed1);
-        }
 
-        emit Claim(msg.sender, msg.sender, claimed0, claimed1);
+        if (fees1ToDistribute > 0) {
+            fees1 = 0;
+            IERC20(token1).safeTransfer(feeDistributor, fees1ToDistribute);
+            IFeeDistributor(feeDistributor).collectFees(token1, fees1ToDistribute);
+        }
     }
 
     /// @notice Claim BTB rewards
