@@ -114,4 +114,13 @@ interface IVotingEscrow is IERC721, IERC721Metadata {
 
     /// @notice Set voting status (called by Voter)
     function voting(uint256 tokenId, bool status) external;
+
+    /// @notice Get remaining emission budget for a veNFT
+    function getEmissionBudget(uint256 tokenId) external view returns (uint256);
+
+    /// @notice Distribute emission from veNFT to a pool (called by Voter)
+    function distributeEmission(uint256 tokenId, address pool, uint256 amount) external;
+
+    /// @notice Get total emissions distributed by a veNFT
+    function emissionsDistributed(uint256 tokenId) external view returns (uint256);
 }

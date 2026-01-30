@@ -6,6 +6,7 @@ import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Own
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IPoolFactory} from "../interfaces/IPoolFactory.sol";
 import {IPool} from "../interfaces/IPool.sol";
+import {IVoter} from "../interfaces/IVoter.sol";
 
 /// @title BTB Finance Pool Factory
 /// @author BTB Finance
@@ -139,6 +140,9 @@ contract PoolFactory is IPoolFactory, OwnableUpgradeable, UUPSUpgradeable {
         _pools[token1][token0][stable] = pool;
         _allPools.push(pool);
         _isPool[pool] = true;
+
+        // Auto-register pool as gauge - permissionless!
+        IVoter(voter).createGauge(pool);
 
         emit PoolCreated(token0, token1, stable, pool, _allPools.length);
     }

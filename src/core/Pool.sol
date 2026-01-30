@@ -11,8 +11,8 @@ import {Math} from "../libraries/Math.sol";
 
 /// @title BTB Finance Pool
 /// @author BTB Finance
-/// @notice V2-style AMM pool supporting volatile (x*y=k) and stable (curve stableswap) pairs
-/// @dev Deployed via CREATE2 from PoolFactory. Each pool is an ERC20 LP token.
+/// @notice V2-style AMM pool with integrated BTB rewards. Voting = instant rewards.
+/// @dev LP holders earn: 1) Trading fees (token0/token1), 2) BTB emissions (via voting)
 contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -41,7 +41,7 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     uint256 public price0CumulativeLast;
     uint256 public price1CumulativeLast;
 
-    // Fee tracking per LP
+    // Trading fee tracking per LP (token0/token1)
     uint256 public index0;
     uint256 public index1;
     mapping(address => uint256) public supplyIndex0;
@@ -61,19 +61,25 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     uint256 internal immutable decimals0;
     uint256 internal immutable decimals1;
 
+    // BTB reward tracking
+    address public rewardToken; // BTB token address
+    uint256 public rewardIndex; // Global BTB per LP token
+    mapping(address => uint256) public supplyRewardIndex; // Per user index
+    mapping(address => uint256) public claimableReward; // BTB rewards owed
+    uint256 public totalBTBRewards; // Total BTB received
+
     /*//////////////////////////////////////////////////////////////
-                              CONSTRUCTOR
+                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
     constructor() {
-        // Get decimals from factory if possible, default to 18
         decimals0 = 18;
         decimals1 = 18;
         _disableInitializers();
     }
 
     /*//////////////////////////////////////////////////////////////
-                              INITIALIZER
+                               INITIALIZER
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IPool
@@ -87,6 +93,9 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         token0 = _token0;
         token1 = _token1;
         stable = _stable;
+        
+        // Get BTB reward token from factory
+        rewardToken = IPoolFactory(factory).voter(); // Voter has rewardToken
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -133,11 +142,20 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
 
     /// @inheritdoc IPool
     function observationLength() external pure override returns (uint256) {
-        return 1; // Simplified - use block.timestamp based TWAP
+        return 1;
+    }
+
+    /// @notice Get pending BTB rewards for an account
+    function pendingReward(address account) external view returns (uint256) {
+        uint256 _supplied = balanceOf(account);
+        if (_supplied == 0) return claimableReward[account];
+        
+        uint256 _delta = rewardIndex - supplyRewardIndex[account];
+        return claimableReward[account] + (_supplied * _delta) / PRECISION;
     }
 
     /*//////////////////////////////////////////////////////////////
-                           LIQUIDITY FUNCTIONS
+                            LIQUIDITY FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IPool
@@ -153,7 +171,7 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         uint256 _totalSupply = totalSupply();
         if (_totalSupply == 0) {
             liquidity = Math.sqrt(amount0 * amount1) - MINIMUM_LIQUIDITY;
-            _mint(address(1), MINIMUM_LIQUIDITY); // Permanently lock first MINIMUM_LIQUIDITY
+            _mint(address(1), MINIMUM_LIQUIDITY);
         } else {
             liquidity = Math.min((amount0 * _totalSupply) / _reserve0, (amount1 * _totalSupply) / _reserve1);
         }
@@ -204,7 +222,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
 
         if (to == token0 || to == token1) revert InvalidTo();
 
-        // Optimistically transfer
         if (amount0Out > 0) IERC20(token0).safeTransfer(to, amount0Out);
         if (amount1Out > 0) IERC20(token1).safeTransfer(to, amount1Out);
 
@@ -215,7 +232,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         uint256 amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
         if (amount0In == 0 && amount1In == 0) revert InsufficientInputAmount();
 
-        // Take fee
         {
             uint256 fee = IPoolFactory(factory).getFee(address(this), stable);
             if (amount0In > 0) {
@@ -228,7 +244,6 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
             }
         }
 
-        // Check K invariant
         uint256 balance0Adjusted = balance0 - fees0;
         uint256 balance1Adjusted = balance1 - fees1;
         if (_k(balance0Adjusted, balance1Adjusted) < _k(_reserve0, _reserve1)) revert K();
@@ -258,6 +273,36 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         }
 
         emit Claim(msg.sender, msg.sender, claimed0, claimed1);
+    }
+
+    /// @notice Claim BTB rewards
+    function claimReward() external nonReentrant returns (uint256) {
+        _updateReward(msg.sender);
+
+        uint256 reward = claimableReward[msg.sender];
+        if (reward > 0) {
+            claimableReward[msg.sender] = 0;
+            IERC20(rewardToken).safeTransfer(msg.sender, reward);
+        }
+
+        return reward;
+    }
+
+    /// @notice Receive BTB from VotingEscrow when someone votes for this pool
+    function notifyRewardAmount(uint256 amount) external {
+        // Only accept from VotingEscrow via Voter
+        require(msg.sender == IPoolFactory(factory).voter(), "Not voter");
+        
+        if (amount == 0) return;
+        
+        // BTB is transferred to this contract by VotingEscrow
+        // Update global reward index
+        uint256 _totalSupply = totalSupply();
+        if (_totalSupply > 0) {
+            rewardIndex += (amount * PRECISION) / _totalSupply;
+        }
+        
+        totalBTBRewards += amount;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -311,22 +356,29 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         supplyIndex1[account] = index1;
     }
 
-    /// @dev Calculate k for invariant check
+    function _updateReward(address account) internal {
+        uint256 _supplied = balanceOf(account);
+        if (_supplied > 0) {
+            uint256 _delta = rewardIndex - supplyRewardIndex[account];
+            if (_delta > 0) {
+                claimableReward[account] += (_supplied * _delta) / PRECISION;
+            }
+        }
+        supplyRewardIndex[account] = rewardIndex;
+    }
+
     function _k(uint256 x, uint256 y) internal view returns (uint256) {
         if (stable) {
-            // Curve stableswap: x³y + xy³
             uint256 _x = (x * PRECISION) / 10 ** decimals0;
             uint256 _y = (y * PRECISION) / 10 ** decimals1;
             uint256 _a = (_x * _y) / PRECISION;
             uint256 _b = ((_x * _x) / PRECISION + (_y * _y) / PRECISION);
             return (_a * _b) / PRECISION;
         } else {
-            // Classic: x * y
             return x * y;
         }
     }
 
-    /// @dev Binary search for y given x and k (stable pools)
     function _getY(uint256 x0, uint256 xy, uint256 y) internal pure returns (uint256) {
         for (uint256 i = 0; i < 255; i++) {
             uint256 yPrev = y;
@@ -368,6 +420,8 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     function _update(address from, address to, uint256 value) internal override {
         _updateFees(from);
         _updateFees(to);
+        _updateReward(from); // Auto-accrue BTB rewards
+        _updateReward(to);
         super._update(from, to, value);
     }
 }

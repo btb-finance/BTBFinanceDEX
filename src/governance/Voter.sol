@@ -7,12 +7,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IVoter} from "../interfaces/IVoter.sol";
 import {IVotingEscrow} from "../interfaces/IVotingEscrow.sol";
 import {IGauge} from "../interfaces/IGauge.sol";
-import {Gauge} from "../gauges/Gauge.sol";
+import {IPool} from "../interfaces/IPool.sol";
 
 /// @title BTB Finance Voter
 /// @author BTB Finance
-/// @notice Voting and gauge management for BTB emissions
-/// @dev Users vote with veBTB to direct emissions to gauges
+/// @notice Personal emissions voting - each veNFT distributes its own BTB budget instantly
+/// @dev No epochs, no weekly system. Vote = instant reward distribution.
 contract Voter is IVoter, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -34,27 +34,18 @@ contract Voter is IVoter, ReentrancyGuard {
     address public override governor;
 
     /// @inheritdoc IVoter
-    address public override minter;
-
-    /// @inheritdoc IVoter
     address public override rewardToken;
 
     /// @inheritdoc IVoter
     uint256 public override totalWeight;
 
-    /// @dev Pool => Gauge
-    mapping(address => address) internal _gauges;
-
-    /// @dev Gauge => Pool
-    mapping(address => address) internal _poolForGauge;
-
-    /// @dev Gauge => Is valid gauge
+    /// @dev Pool => Is valid gauge (pool is its own gauge)
     mapping(address => bool) internal _isGauge;
 
-    /// @dev Gauge => Is alive
+    /// @dev Pool => Is alive
     mapping(address => bool) internal _isAlive;
 
-    /// @dev Pool => Total votes
+    /// @dev Pool => Total votes (for display)
     mapping(address => uint256) internal _weights;
 
     /// @dev Token ID => Pool => Votes
@@ -63,36 +54,23 @@ contract Voter is IVoter, ReentrancyGuard {
     /// @dev Token ID => Used weight
     mapping(uint256 => uint256) internal _usedWeights;
 
-    /// @dev Token ID => Last voted epoch
-    mapping(uint256 => uint256) internal _lastVoted;
-
     /// @dev Token ID => Pools voted for
     mapping(uint256 => address[]) internal _poolVote;
-
-    /// @dev Token => Is whitelisted
-    mapping(address => bool) internal _isWhitelistedToken;
 
     /// @dev All pools with gauges
     address[] internal _allPools;
 
-    /// @dev Reward claimable per gauge
-    mapping(address => uint256) public claimable;
-
-    /// @dev Index for global distribution
-    uint256 public index;
-
-    /// @dev Gauge supply index
-    mapping(address => uint256) public supplyIndex;
+    /// @dev Pool => Total BTB received (for stats)
+    mapping(address => uint256) public totalRewards;
 
     /*//////////////////////////////////////////////////////////////
-                              CONSTRUCTOR
+                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
     constructor(address _ve, address _rewardToken) {
         ve = _ve;
         rewardToken = _rewardToken;
         governor = msg.sender;
-        minter = msg.sender;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -101,12 +79,12 @@ contract Voter is IVoter, ReentrancyGuard {
 
     /// @inheritdoc IVoter
     function gauges(address pool) external view override returns (address) {
-        return _gauges[pool];
+        return _isGauge[pool] ? pool : address(0);
     }
 
     /// @inheritdoc IVoter
     function poolForGauge(address gauge) external view override returns (address) {
-        return _poolForGauge[gauge];
+        return _isGauge[gauge] ? gauge : address(0);
     }
 
     /// @inheritdoc IVoter
@@ -135,13 +113,8 @@ contract Voter is IVoter, ReentrancyGuard {
     }
 
     /// @inheritdoc IVoter
-    function lastVoted(uint256 tokenId) external view override returns (uint256) {
-        return _lastVoted[tokenId];
-    }
-
-    /// @inheritdoc IVoter
-    function isWhitelistedToken(address token) external view override returns (bool) {
-        return _isWhitelistedToken[token];
+    function isWhitelistedToken(address token) external pure override returns (bool) {
+        return true; // No whitelisting - permissionless
     }
 
     /// @inheritdoc IVoter
@@ -155,32 +128,27 @@ contract Voter is IVoter, ReentrancyGuard {
     }
 
     /*//////////////////////////////////////////////////////////////
-                           GAUGE MANAGEMENT
+                            GAUGE MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IVoter
-    /// @notice Anyone can create a gauge for any pool where BOTH tokens are whitelisted
+    /// @notice Anyone can create a gauge for any pool - permissionless!
     function createGauge(address pool) external override returns (address gauge) {
         // Check gauge doesn't already exist
-        if (_gauges[pool] != address(0)) revert NotWhitelisted();
+        if (_isGauge[pool]) revert NotGauge();
 
-        // Get pool tokens and verify both are whitelisted
-        address token0 = _getToken0(pool);
-        address token1 = _getToken1(pool);
-        
-        if (!_isWhitelistedToken[token0] || !_isWhitelistedToken[token1]) {
-            revert NotWhitelisted(); // BOTH tokens must be whitelisted
-        }
+        // Verify it's a valid pool with token0/token1
+        (bool success0, ) = pool.staticcall(abi.encodeWithSignature("token0()"));
+        (bool success1, ) = pool.staticcall(abi.encodeWithSignature("token1()"));
+        if (!success0 || !success1) revert NotWhitelisted();
 
-        gauge = address(new Gauge(pool, rewardToken, address(this)));
-
-        _gauges[pool] = gauge;
-        _poolForGauge[gauge] = pool;
-        _isGauge[gauge] = true;
-        _isAlive[gauge] = true;
+        // Pool is its own gauge
+        _isGauge[pool] = true;
+        _isAlive[pool] = true;
         _allPools.push(pool);
 
-        emit GaugeCreated(pool, gauge, msg.sender);
+        emit GaugeCreated(pool, pool, msg.sender);
+        return pool;
     }
 
     /// @inheritdoc IVoter
@@ -200,33 +168,109 @@ contract Voter is IVoter, ReentrancyGuard {
     }
 
     /*//////////////////////////////////////////////////////////////
-                              VOTING
+                               VOTING
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IVoter
+    /// @notice Vote and INSTANTLY distribute your veNFT's BTB emissions to pools
     function vote(uint256 tokenId, address[] calldata pools, uint256[] calldata weights_) external override nonReentrant {
         if (!IVotingEscrow(ve).isApprovedOrOwner(msg.sender, tokenId)) revert NotApprovedOrOwner();
         if (pools.length != weights_.length) revert InvalidWeights();
         if (pools.length > MAX_POOLS) revert TooManyPools();
+        if (pools.length == 0) revert InvalidWeights();
 
-        uint256 currentEpoch = _epochStart(block.timestamp);
-        if (_lastVoted[tokenId] >= currentEpoch) revert AlreadyVotedThisEpoch();
+        // Get voting power and available emission budget from veNFT
+        uint256 votingPower = IVotingEscrow(ve).balanceOfNFT(tokenId);
+        uint256 emissionBudget = IVotingEscrow(ve).getEmissionBudget(tokenId);
+        
+        if (votingPower == 0) revert NotWhitelisted();
+        if (emissionBudget == 0) revert ZeroAmount();
 
+        // Reset previous votes and return any unspent emissions
         _reset(tokenId);
-        _vote(tokenId, pools, weights_);
+
+        // Calculate total weight
+        uint256 totalVoteWeight = 0;
+        for (uint256 i = 0; i < weights_.length; i++) {
+            totalVoteWeight += weights_[i];
+        }
+        if (totalVoteWeight == 0) revert InvalidWeights();
+
+        // Distribute emissions proportionally
+        uint256 usedEmissions = 0;
+        
+        for (uint256 i = 0; i < pools.length; i++) {
+            address pool = pools[i];
+            
+            // Check pool has a gauge and is alive
+            if (!_isGauge[pool]) {
+                // Auto-create gauge if needed
+                createGauge(pool);
+            }
+            if (!_isAlive[pool]) continue;
+
+            // Calculate this pool's share of emissions
+            uint256 poolEmission = (emissionBudget * weights_[i]) / totalVoteWeight;
+            
+            if (poolEmission > 0) {
+                // INSTANTLY transfer BTB from veNFT to pool
+                IVotingEscrow(ve).distributeEmission(tokenId, pool, poolEmission);
+                
+                // Track votes for stats/display
+                _votes[tokenId][pool] = (votingPower * weights_[i]) / totalVoteWeight;
+                _weights[pool] += _votes[tokenId][pool];
+                _poolVote[tokenId].push(pool);
+                
+                // Track total rewards sent to pool
+                totalRewards[pool] += poolEmission;
+                usedEmissions += poolEmission;
+
+                emit Voted(msg.sender, tokenId, pool, _votes[tokenId][pool]);
+            }
+        }
+
+        _usedWeights[tokenId] = votingPower;
+        totalWeight += votingPower;
+
+        // Mark this veNFT as having voted (prevents double voting with same budget)
+        IVotingEscrow(ve).voting(tokenId, true);
+        
+        emit NotifyReward(msg.sender, rewardToken, usedEmissions);
     }
 
     /// @inheritdoc IVoter
     function reset(uint256 tokenId) external override nonReentrant {
         if (!IVotingEscrow(ve).isApprovedOrOwner(msg.sender, tokenId)) revert NotApprovedOrOwner();
-
-        uint256 currentEpoch = _epochStart(block.timestamp);
-        if (_lastVoted[tokenId] >= currentEpoch) revert AlreadyVotedThisEpoch();
-
         _reset(tokenId);
     }
 
+    function _reset(uint256 tokenId) internal {
+        address[] storage pools = _poolVote[tokenId];
+        uint256 totalVotesRemoved = 0;
+
+        for (uint256 i = 0; i < pools.length; i++) {
+            address pool = pools[i];
+            uint256 votes_ = _votes[tokenId][pool];
+
+            if (votes_ > 0) {
+                _weights[pool] -= votes_;
+                totalWeight -= votes_;
+                _votes[tokenId][pool] = 0;
+                totalVotesRemoved += votes_;
+
+                emit Abstained(msg.sender, tokenId, votes_);
+            }
+        }
+
+        delete _poolVote[tokenId];
+        _usedWeights[tokenId] = 0;
+
+        // Unmark voting status (allows re-voting with remaining budget)
+        IVotingEscrow(ve).voting(tokenId, false);
+    }
+
     /// @inheritdoc IVoter
+    /// @notice Re-apply same votes (useful if you want to re-distribute remaining budget)
     function poke(uint256 tokenId) external override nonReentrant {
         if (!IVotingEscrow(ve).isApprovedOrOwner(msg.sender, tokenId)) revert NotApprovedOrOwner();
 
@@ -238,164 +282,25 @@ contract Voter is IVoter, ReentrancyGuard {
         }
 
         _reset(tokenId);
-        _vote(tokenId, pools, weights_);
-    }
-
-    function _vote(uint256 tokenId, address[] memory pools, uint256[] memory weights_) internal {
-        uint256 votingPower = IVotingEscrow(ve).balanceOfNFT(tokenId);
-        uint256 totalVoteWeight = 0;
-
-        for (uint256 i = 0; i < weights_.length; i++) {
-            totalVoteWeight += weights_[i];
-        }
-
-        uint256 usedWeight = 0;
-
-        for (uint256 i = 0; i < pools.length; i++) {
-            address pool = pools[i];
-            address gauge = _gauges[pool];
-
-            if (gauge == address(0)) continue;
-            if (!_isAlive[gauge]) continue;
-
-            uint256 poolWeight = (weights_[i] * votingPower) / totalVoteWeight;
-
-            _votes[tokenId][pool] = poolWeight;
-            _weights[pool] += poolWeight;
-            totalWeight += poolWeight;
-            usedWeight += poolWeight;
-
-            _poolVote[tokenId].push(pool);
-
-            emit Voted(msg.sender, tokenId, pool, poolWeight);
-        }
-
-        _usedWeights[tokenId] = usedWeight;
-        _lastVoted[tokenId] = _epochStart(block.timestamp);
-
-        IVotingEscrow(ve).voting(tokenId, true);
-    }
-
-    function _reset(uint256 tokenId) internal {
-        address[] storage pools = _poolVote[tokenId];
-
-        for (uint256 i = 0; i < pools.length; i++) {
-            address pool = pools[i];
-            uint256 votes_ = _votes[tokenId][pool];
-
-            if (votes_ > 0) {
-                _weights[pool] -= votes_;
-                totalWeight -= votes_;
-                _votes[tokenId][pool] = 0;
-
-                emit Abstained(msg.sender, tokenId, votes_);
-            }
-        }
-
-        delete _poolVote[tokenId];
-        _usedWeights[tokenId] = 0;
-
-        IVotingEscrow(ve).voting(tokenId, false);
+        vote(tokenId, pools, weights_);
     }
 
     /*//////////////////////////////////////////////////////////////
-                           REWARD DISTRIBUTION
+                            REWARD DISTRIBUTION
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IVoter
-    function notifyRewardAmount(uint256 amount) external override nonReentrant {
-        if (amount == 0) revert ZeroAmount();
-
-        IERC20(rewardToken).safeTransferFrom(msg.sender, address(this), amount);
-
-        uint256 _totalWeight = totalWeight;
-        if (_totalWeight > 0) {
-            index += (amount * 1e18) / _totalWeight;
-        }
-
-        emit NotifyReward(msg.sender, rewardToken, amount);
-    }
-
-    /// @inheritdoc IVoter
-    function distribute(address gauge) public override {
-        _updateFor(gauge);
-        uint256 _claimable = claimable[gauge];
-        if (_claimable > 0 && _isAlive[gauge]) {
-            claimable[gauge] = 0;
-            IERC20(rewardToken).approve(gauge, _claimable);
-            IGauge(gauge).notifyRewardAmount(_claimable);
-            emit DistributeReward(msg.sender, gauge, _claimable);
-        }
-    }
-
-    /// @inheritdoc IVoter
-    function distributeAll() external override {
-        for (uint256 i = 0; i < _allPools.length; i++) {
-            address gauge = _gauges[_allPools[i]];
-            if (gauge != address(0)) {
-                distribute(gauge);
-            }
-        }
-    }
-
-    function _updateFor(address gauge) internal {
-        address pool = _poolForGauge[gauge];
-        uint256 _weight = _weights[pool];
-
-        if (_weight > 0) {
-            uint256 _supplyIndex = supplyIndex[gauge];
-            uint256 _index = index;
-            supplyIndex[gauge] = _index;
-            uint256 delta = _index - _supplyIndex;
-            if (delta > 0) {
-                claimable[gauge] += (_weight * delta) / 1e18;
-            }
-        }
+    /// @notice Get total rewards sent to a pool (for stats)
+    function getPoolRewards(address pool) external view returns (uint256) {
+        return totalRewards[pool];
     }
 
     /*//////////////////////////////////////////////////////////////
-                              ADMIN
+                               ADMIN
     //////////////////////////////////////////////////////////////*/
-
-    /// @inheritdoc IVoter
-    function whitelistToken(address token, bool status) external override {
-        if (msg.sender != governor) revert NotGovernor();
-        _isWhitelistedToken[token] = status;
-        emit WhitelistToken(token, status);
-    }
 
     function setGovernor(address _governor) external {
         if (msg.sender != governor) revert NotGovernor();
         if (_governor == address(0)) revert ZeroAddress();
         governor = _governor;
-    }
-
-    function setMinter(address _minter) external {
-        if (msg.sender != governor) revert NotGovernor();
-        if (_minter == address(0)) revert ZeroAddress();
-        minter = _minter;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                          INTERNAL FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
-
-    function _epochStart(uint256 timestamp) internal pure returns (uint256) {
-        return (timestamp / WEEK) * WEEK;
-    }
-
-    /// @dev Get token0 from a pool (works for both V2 and CL pools)
-    function _getToken0(address pool) internal view returns (address) {
-        // Both Pool and CLPool have token0() function
-        (bool success, bytes memory data) = pool.staticcall(abi.encodeWithSignature("token0()"));
-        require(success && data.length >= 32, "Invalid pool");
-        return abi.decode(data, (address));
-    }
-
-    /// @dev Get token1 from a pool (works for both V2 and CL pools)
-    function _getToken1(address pool) internal view returns (address) {
-        (bool success, bytes memory data) = pool.staticcall(abi.encodeWithSignature("token1()"));
-        require(success && data.length >= 32, "Invalid pool");
-        return abi.decode(data, (address));
     }
 }

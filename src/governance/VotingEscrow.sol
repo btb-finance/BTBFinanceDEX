@@ -8,6 +8,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IVotingEscrow} from "../interfaces/IVotingEscrow.sol";
+import {IPool} from "../interfaces/IPool.sol";
 
 /// @title BTB Finance VotingEscrow
 /// @author BTB Finance
@@ -59,6 +60,12 @@ contract VotingEscrow is IVotingEscrow, ERC721Upgradeable, ERC721EnumerableUpgra
 
     /// @dev Team address for admin functions
     address public team;
+
+    /// @dev Token ID => Emissions already distributed to pools
+    mapping(uint256 => uint256) public emissionsDistributed;
+
+    /// @dev Token ID => Total emission budget (set on lock creation)
+    mapping(uint256 => uint256) public emissionBudget;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -270,6 +277,38 @@ contract VotingEscrow is IVotingEscrow, ERC721Upgradeable, ERC721EnumerableUpgra
         voted[_tokenId] = _status;
     }
 
+    /// @inheritdoc IVotingEscrow
+    /// @notice Get remaining emission budget for a veNFT
+    /// @dev Budget = locked amount - already distributed
+    function getEmissionBudget(uint256 _tokenId) external view override returns (uint256) {
+        uint256 budget = emissionBudget[_tokenId];
+        uint256 distributed = emissionsDistributed[_tokenId];
+        return budget > distributed ? budget - distributed : 0;
+    }
+
+    /// @inheritdoc IVotingEscrow
+    /// @notice Distribute BTB emissions from veNFT to a pool
+    /// @dev Only callable by Voter contract
+    function distributeEmission(uint256 _tokenId, address _pool, uint256 _amount) external override {
+        if (msg.sender != voter) revert NotVoter();
+        if (_amount == 0) revert ZeroAmount();
+        
+        uint256 budget = emissionBudget[_tokenId];
+        uint256 distributed = emissionsDistributed[_tokenId];
+        uint256 remaining = budget > distributed ? budget - distributed : 0;
+        
+        if (_amount > remaining) revert ZeroAmount(); // Not enough budget
+        
+        // Transfer BTB to pool
+        IERC20(token).safeTransfer(_pool, _amount);
+        
+        // Track distribution
+        emissionsDistributed[_tokenId] += _amount;
+        
+        // Notify pool to distribute to LP holders
+        IPool(_pool).notifyRewardAmount(_amount);
+    }
+
     /*//////////////////////////////////////////////////////////////
                           INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -294,6 +333,8 @@ contract VotingEscrow is IVotingEscrow, ERC721Upgradeable, ERC721EnumerableUpgra
 
         if (_value > 0) {
             IERC20(token).safeTransferFrom(msg.sender, address(this), _value);
+            // Set emission budget equal to locked amount
+            emissionBudget[_tokenId] += _value;
         }
 
         emit Deposit(msg.sender, _tokenId, _value, newLocked.end, block.timestamp);
