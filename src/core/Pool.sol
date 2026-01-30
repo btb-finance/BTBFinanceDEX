@@ -205,7 +205,7 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
                             SWAP FUNCTION
     //////////////////////////////////////////////////////////////*/
 
-    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata) external override nonReentrant {
+    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata) public override nonReentrant {
         if (amount0Out == 0 && amount1Out == 0) revert InsufficientOutputAmount();
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         if (amount0Out >= _reserve0 || amount1Out >= _reserve1) revert InsufficientLiquidity();
