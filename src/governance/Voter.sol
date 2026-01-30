@@ -228,7 +228,7 @@ contract Voter is IVoter, ReentrancyGuard {
         }
 
         _reset(tokenId);
-        vote(tokenId, pools, weights_);
+        this.vote(tokenId, pools, weights_);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -267,5 +267,41 @@ contract Voter is IVoter, ReentrancyGuard {
     /// @dev Deprecated - no revive needed
     function reviveGauge(address) external pure override {
         // No-op
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev No minter in this simplified system
+    function minter() external pure override returns (address) {
+        return address(0);
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev No epoch-based voting, always returns 0
+    function lastVoted(uint256) external pure override returns (uint256) {
+        return 0;
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev Deprecated - rewards distributed instantly via vote()
+    function notifyRewardAmount(uint256) external pure override {
+        // No-op: rewards are distributed instantly when voting
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev Deprecated - no distribution needed in instant system
+    function distribute(address) external pure override {
+        // No-op: rewards distributed instantly via vote()
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev Deprecated - no distribution needed in instant system
+    function distributeAll() external pure override {
+        // No-op: rewards distributed instantly via vote()
+    }
+
+    /// @inheritdoc IVoter
+    /// @dev Deprecated - all tokens are whitelisted by default
+    function whitelistToken(address, bool) external pure override {
+        // No-op: all tokens are whitelisted
     }
 }

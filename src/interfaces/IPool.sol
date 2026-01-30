@@ -95,4 +95,7 @@ interface IPool {
 
     /// @notice Claim accumulated trading fees
     function claimFees() external returns (uint256 claimed0, uint256 claimed1);
+
+    /// @notice Receive BTB rewards from voter when pool receives votes
+    function notifyRewardAmount(uint256 amount) external;
 }
