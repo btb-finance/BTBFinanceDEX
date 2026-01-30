@@ -5,7 +5,7 @@ import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IPool} from "../interfaces/IPool.sol";
+import {IPool, IPoolCallee} from "../interfaces/IPool.sol";
 import {IPoolFactory} from "../interfaces/IPoolFactory.sol";
 import {IFlashLoanReceiver} from "../interfaces/IFlashLoanReceiver.sol";
 import {Math} from "../libraries/Math.sol";
@@ -399,7 +399,7 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     /// @param token1Amount Amount of token1 to borrow
     /// @param receiver Address to receive flash loan callback
     /// @param data Arbitrary data to pass to receiver
-    function flash(uint256 token0Amount, uint256 token1Amount, address receiver, bytes calldata data) external override nonReentrant {
+    function flash(uint256 token0Amount, uint256 token1Amount, address receiver, bytes calldata data) external nonReentrant {
         if (token0Amount == 0 && token1Amount == 0) revert InsufficientOutputAmount();
         if (token0Amount >= reserve0 || token1Amount >= reserve1) revert InsufficientLiquidity();
 

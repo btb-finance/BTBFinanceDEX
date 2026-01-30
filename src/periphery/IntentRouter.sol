@@ -121,8 +121,8 @@ contract IntentRouter is ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     constructor(
-        address _poolManager,
-        address _reclammManager,
+        address payable _poolManager,
+        address payable _reclammManager,
         address _feeRecipient
     ) {
         poolManager = MEVProtectedPoolManager(_poolManager);
@@ -141,6 +141,14 @@ contract IntentRouter is ReentrancyGuard {
         Intent calldata intent,
         RFQQuote calldata quote
     ) external nonReentrant returns (uint256 amountOut) {
+        return _executeIntentInternal(intent, quote);
+    }
+
+    /// @dev Internal intent execution
+    function _executeIntentInternal(
+        Intent calldata intent,
+        RFQQuote calldata quote
+    ) internal returns (uint256 amountOut) {
         if (block.timestamp > intent.deadline) revert IntentExpired();
 
         bytes32 intentHash = keccak256(abi.encode(intent, nonces[intent.user]++));
@@ -368,7 +376,7 @@ contract IntentRouter is ReentrancyGuard {
         amountsOut = new uint256[](intents.length);
         
         for (uint256 i = 0; i < intents.length; i++) {
-            amountsOut[i] = executeIntent(intents[i], quotes[i]);
+            amountsOut[i] = this.executeIntent(intents[i], quotes[i]);
         }
         
         return amountsOut;
@@ -390,7 +398,7 @@ contract IntentRouter is ReentrancyGuard {
         // (In production: use WETH contract)
         
         // Execute the swap
-        amountOut = executeIntent(intent, quote);
+        amountOut = _executeIntentInternal(intent, quote);
         
         // Transfer output tokens to user
         // If output is ETH, unwrap WETH

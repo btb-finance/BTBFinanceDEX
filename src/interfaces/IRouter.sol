@@ -10,6 +10,7 @@ interface IRouter {
 
     error Expired();
     error InsufficientOutputAmount();
+    error InsufficientInputAmount();
     error InsufficientAAmount();
     error InsufficientBAmount();
     error InvalidPath();
@@ -17,6 +18,7 @@ interface IRouter {
     error RouteNotFound();
     error ETHTransferFailed();
     error OnlyWETH();
+    error PoolDoesNotExist();
 
     /*//////////////////////////////////////////////////////////////
                                 STRUCTS

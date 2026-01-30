@@ -29,7 +29,7 @@ contract PoolManager is ReentrancyGuard {
         bool initialized;
         uint256 reserve0;
         uint256 reserve1;
-        uint256 liquidity;
+        uint128 liquidity;
     }
 
     struct ModifyLiquidityParams {
@@ -199,10 +199,16 @@ contract PoolManager is ReentrancyGuard {
         // Update position
         bytes32 positionKey = keccak256(abi.encodePacked(msg.sender, params.tickLower, params.tickUpper));
         Position storage position = positions[poolId][positionKey];
-        position.liquidity = uint128(int128(position.liquidity) + params.liquidityDelta);
-
-        // Update pool liquidity
-        pool.liquidity = uint128(int128(pool.liquidity) + params.liquidityDelta);
+        
+        // Update liquidity (handle both positive and negative)
+        if (params.liquidityDelta > 0) {
+            position.liquidity += uint128(uint128(params.liquidityDelta));
+            pool.liquidity += uint128(uint128(params.liquidityDelta));
+        } else {
+            uint128 delta = uint128(uint128(-params.liquidityDelta));
+            position.liquidity -= delta;
+            pool.liquidity -= delta;
+        }
 
         // Update reserves
         if (amount0 > 0) {
@@ -217,8 +223,9 @@ contract PoolManager is ReentrancyGuard {
         }
 
         // Flash accounting - track deltas
-        currencyDeltas[poolIdToTokens(poolId).token0] -= amount0;
-        currencyDeltas[poolIdToTokens(poolId).token1] -= amount1;
+        (address token0, address token1) = poolIdToTokens(poolId);
+        currencyDeltas[token0] -= amount0;
+        currencyDeltas[token1] -= amount1;
 
         // After hook
         if (hook != address(0)) {
@@ -345,7 +352,7 @@ contract PoolManager is ReentrancyGuard {
 
         if (params.liquidityDelta > 0) {
             // Adding liquidity
-            uint256 liquidity = uint128(params.liquidityDelta);
+            uint128 liquidity = uint128(uint128(params.liquidityDelta));
             amount0 = int256(LiquidityMath.getAmount0ForLiquidity(sqrtPriceAX96, sqrtPriceBX96, liquidity));
             amount1 = int256(LiquidityMath.getAmount1ForLiquidity(sqrtPriceAX96, sqrtPriceBX96, liquidity));
             
@@ -357,7 +364,7 @@ contract PoolManager is ReentrancyGuard {
             }
         } else {
             // Removing liquidity
-            uint256 liquidity = uint128(-params.liquidityDelta);
+            uint128 liquidity = uint128(uint128(-params.liquidityDelta));
             amount0 = -int256(LiquidityMath.getAmount0ForLiquidity(sqrtPriceAX96, sqrtPriceBX96, liquidity));
             amount1 = -int256(LiquidityMath.getAmount1ForLiquidity(sqrtPriceAX96, sqrtPriceBX96, liquidity));
             

@@ -9,7 +9,7 @@ import {VotingEscrow} from "./VotingEscrow.sol";
 /// @title BribeMarket - Incentivize veBTB voting
 /// @notice Protocols can bribe veBTB holders to vote for their pools
 contract BribeMarket is ReentrancyGuard {
-    using SafeERC20 for IERCC20;
+    using SafeERC20 for IERC20;
 
     /*//////////////////////////////////////////////////////////////
                                 STRUCTS
