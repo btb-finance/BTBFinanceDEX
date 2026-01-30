@@ -17,6 +17,9 @@ interface IPool {
     error K();
     error NotFactory();
     error Locked();
+    error SlippageExceeded();
+    error FlashLoanCallbackFailed();
+    error FlashLoanNotRepaid();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -35,9 +38,10 @@ interface IPool {
     event Sync(uint112 reserve0, uint112 reserve1);
     event Fees(address indexed sender, uint256 amount0, uint256 amount1);
     event Claim(address indexed sender, address indexed recipient, uint256 amount0, uint256 amount1);
+    event FlashLoan(address indexed receiver, uint256 token0Amount, uint256 token1Amount, uint256 fee0, uint256 fee1);
 
     /*//////////////////////////////////////////////////////////////
-                              VIEW FUNCTIONS
+                               VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice The first token of the pool
@@ -72,7 +76,7 @@ interface IPool {
     function claimable1(address account) external view returns (uint256);
 
     /*//////////////////////////////////////////////////////////////
-                            WRITE FUNCTIONS
+                             WRITE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Initialize pool with tokens (called by factory)
@@ -87,6 +91,15 @@ interface IPool {
     /// @notice Swap tokens
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external;
 
+    /// @notice Swap tokens with slippage protection
+    function swapWithSlippage(
+        uint256 amount0Out,
+        uint256 amount1Out,
+        uint256 minOutput,
+        address to,
+        bytes calldata data
+    ) external;
+
     /// @notice Sync reserves to balances
     function sync() external;
 
@@ -98,4 +111,11 @@ interface IPool {
 
     /// @notice Receive BTB rewards from voter when pool receives votes
     function notifyRewardAmount(uint256 amount) external;
+
+    /// @notice Flash loan - borrow tokens without collateral, repay in same tx
+    /// @param token0Amount Amount of token0 to borrow (0 if only borrowing token1)
+    /// @param token1Amount Amount of token1 to borrow (0 if only borrowing token0)
+    /// @param receiver Address to receive the flash loan
+    /// @param data Arbitrary data to pass to receiver callback
+    function flash(uint256 token0Amount, uint256 token1Amount, address receiver, bytes calldata data) external;
 }

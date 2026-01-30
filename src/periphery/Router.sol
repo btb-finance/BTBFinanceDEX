@@ -349,6 +349,110 @@ contract Router is IRouter {
     }
 
     /*//////////////////////////////////////////////////////////////
+                              ZAP FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Zap in with single token - swap half, add liquidity in one tx
+    function zapIn(
+        address tokenIn,
+        uint256 amountIn,
+        address token0,
+        address token1,
+        bool stable,
+        uint256 minLpOut,
+        address to,
+        uint256 deadline
+    ) external ensure(deadline) returns (uint256 liquidity) {
+        if (amountIn == 0) revert InsufficientInputAmount();
+
+        // Transfer tokens to this contract
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
+
+        address pool = poolFor(token0, token1, stable);
+        if (pool == address(0)) revert PoolDoesNotExist();
+
+        // If tokenIn is not one of the pair, need to swap first
+        if (tokenIn != token0 && tokenIn != token1) {
+            revert("Zap from third token not supported");
+        }
+
+        // Split 50/50
+        uint256 half = amountIn / 2;
+
+        // Swap half to other token
+        if (tokenIn == token0) {
+            // Swap half to token1
+            if (half > 0) {
+                uint256 amountOut = IPool(pool).getAmountOut(half, token0);
+                IERC20(token0).safeTransfer(pool, half);
+                IPool(pool).swap(0, amountOut, address(this), new bytes(0));
+            }
+        } else {
+            // Swap half to token0
+            if (half > 0) {
+                uint256 amountOut = IPool(pool).getAmountOut(half, token1);
+                IERC20(token1).safeTransfer(pool, half);
+                IPool(pool).swap(amountOut, 0, address(this), new bytes(0));
+            }
+        }
+
+        // Add liquidity
+        uint256 balance0 = IERC20(token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(token1).balanceOf(address(this));
+        
+        IERC20(token0).safeTransfer(pool, balance0);
+        IERC20(token1).safeTransfer(pool, balance1);
+        
+        liquidity = IPool(pool).mint(to);
+        if (liquidity < minLpOut) revert InsufficientOutputAmount();
+
+        // Refund dust
+        uint256 dust0 = IERC20(token0).balanceOf(address(this));
+        uint256 dust1 = IERC20(token1).balanceOf(address(this));
+        if (dust0 > 0) IERC20(token0).safeTransfer(msg.sender, dust0);
+        if (dust1 > 0) IERC20(token1).safeTransfer(msg.sender, dust1);
+    }
+
+    /// @notice Zap out - remove liquidity and swap to single token
+    function zapOut(
+        address pool,
+        uint256 liquidity,
+        address tokenOut,
+        uint256 minOut,
+        address to,
+        uint256 deadline
+    ) external ensure(deadline) returns (uint256 amountOut) {
+        if (liquidity == 0) revert InsufficientInputAmount();
+
+        // Transfer LP to pool
+        IERC20(pool).safeTransferFrom(msg.sender, pool, liquidity);
+        
+        // Burn LP
+        (uint256 amount0, uint256 amount1) = IPool(pool).burn(address(this));
+
+        address token0 = IPool(pool).token0();
+        address token1 = IPool(pool).token1();
+
+        // Swap to desired output
+        if (tokenOut == token0 && amount1 > 0) {
+            IERC20(token1).safeTransfer(pool, amount1);
+            uint256 swapOut = IPool(pool).getAmountOut(amount1, token1);
+            IPool(pool).swap(swapOut, 0, address(this), new bytes(0));
+        } else if (tokenOut == token1 && amount0 > 0) {
+            IERC20(token0).safeTransfer(pool, amount0);
+            uint256 swapOut = IPool(pool).getAmountOut(amount0, token0);
+            IPool(pool).swap(0, swapOut, address(this), new bytes(0));
+        } else if (tokenOut != token0 && tokenOut != token1) {
+            revert InvalidPath();
+        }
+
+        amountOut = IERC20(tokenOut).balanceOf(address(this));
+        if (amountOut < minOut) revert InsufficientOutputAmount();
+        
+        IERC20(tokenOut).safeTransfer(to, amountOut);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                               RECEIVE ETH
     //////////////////////////////////////////////////////////////*/
 

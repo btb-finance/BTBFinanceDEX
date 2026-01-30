@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IPool} from "../interfaces/IPool.sol";
 import {IPoolFactory} from "../interfaces/IPoolFactory.sol";
+import {IFlashLoanReceiver} from "../interfaces/IFlashLoanReceiver.sol";
 import {Math} from "../libraries/Math.sol";
 
 /// @title BTB Finance Pool
@@ -252,6 +253,30 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
+    /// @inheritdoc IPool
+    /// @notice Swap with slippage protection - reverts if output is less than minOutput
+    function swapWithSlippage(
+        uint256 amount0Out,
+        uint256 amount1Out,
+        uint256 minOutput,
+        address to,
+        bytes calldata data
+    ) external override nonReentrant {
+        // Determine which token is being output
+        uint256 actualOutput;
+        if (amount0Out > 0) {
+            actualOutput = amount0Out;
+        } else if (amount1Out > 0) {
+            actualOutput = amount1Out;
+        }
+        
+        // Check slippage
+        if (actualOutput < minOutput) revert SlippageExceeded();
+        
+        // Execute normal swap
+        swap(amount0Out, amount1Out, to, data);
+    }
+
     /*//////////////////////////////////////////////////////////////
                             FEE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -318,6 +343,58 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     function skim(address to) external override nonReentrant {
         IERC20(token0).safeTransfer(to, IERC20(token0).balanceOf(address(this)) - reserve0);
         IERC20(token1).safeTransfer(to, IERC20(token1).balanceOf(address(this)) - reserve1);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          FLASH LOAN
+    //////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IPool
+    /// @notice Flash loan - borrow tokens without collateral, must repay + fee in same tx
+    /// @param token0Amount Amount of token0 to borrow
+    /// @param token1Amount Amount of token1 to borrow
+    /// @param receiver Address to receive flash loan callback
+    /// @param data Arbitrary data to pass to receiver
+    function flash(uint256 token0Amount, uint256 token1Amount, address receiver, bytes calldata data) external override nonReentrant {
+        if (token0Amount == 0 && token1Amount == 0) revert InsufficientOutputAmount();
+        if (token0Amount >= reserve0 || token1Amount >= reserve1) revert InsufficientLiquidity();
+
+        // Flash loan fee: 0.05% (5 basis points)
+        uint256 FLASH_LOAN_FEE = 5;
+        uint256 fee0 = (token0Amount * FLASH_LOAN_FEE) / 10000;
+        uint256 fee1 = (token1Amount * FLASH_LOAN_FEE) / 10000;
+
+        // Track balances before loan
+        uint256 balance0Before = IERC20(token0).balanceOf(address(this));
+        uint256 balance1Before = IERC20(token1).balanceOf(address(this));
+
+        // Transfer tokens to receiver
+        if (token0Amount > 0) IERC20(token0).safeTransfer(receiver, token0Amount);
+        if (token1Amount > 0) IERC20(token1).safeTransfer(receiver, token1Amount);
+
+        // Call receiver callback
+        IFlashLoanReceiver(receiver).onFlashLoan(
+            msg.sender,
+            token0Amount,
+            token1Amount,
+            fee0,
+            fee1,
+            data
+        );
+
+        // Verify repayment + fee
+        uint256 balance0After = IERC20(token0).balanceOf(address(this));
+        uint256 balance1After = IERC20(token1).balanceOf(address(this));
+
+        // Must repay at least borrowed amount + fee
+        if (token0Amount > 0 && balance0After < balance0Before + fee0) revert FlashLoanNotRepaid();
+        if (token1Amount > 0 && balance1After < balance1Before + fee1) revert FlashLoanNotRepaid();
+
+        // Accrue flash loan fees to LP holders
+        if (fee0 > 0) fees0 += fee0;
+        if (fee1 > 0) fees1 += fee1;
+
+        emit FlashLoan(receiver, token0Amount, token1Amount, fee0, fee1);
     }
 
     /*//////////////////////////////////////////////////////////////

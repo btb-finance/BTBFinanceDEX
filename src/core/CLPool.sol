@@ -270,10 +270,11 @@ contract CLPool is ICLPool {
 
         // Simplified swap - single step
         // In production, this would iterate through ticks
+        uint256 amountIn = 0; // Declare outside to fix scope issue
+        uint256 amountOut;
+        
         if (liquidityLocal > 0 && amountSpecifiedRemaining > 0) {
             // Calculate swap amounts using simplified constant product formula for demo
-            uint256 amountIn;
-            uint256 amountOut;
 
             if (zeroForOne) {
                 // Swap token0 for token1
