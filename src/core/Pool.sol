@@ -5,7 +5,7 @@ import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IPool} from "../interfaces/IPool.sol";
+import {IPool, IInstantFeeDistributor} from "../interfaces/IPool.sol";
 import {IPoolFactory} from "../interfaces/IPoolFactory.sol";
 import {Math} from "../libraries/Math.sol";
 
@@ -265,22 +265,24 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Distribute ALL accumulated fees to veBTB holders
-    /// @dev Anyone can call this. Fees go to VotingEscrow for distribution.
+    /// @dev Anyone can call this. Fees go to IInstantFeeDistributor for instant distribution.
     function distributeFees() external override nonReentrant {
         uint256 fees0ToSend = fees0;
         uint256 fees1ToSend = fees1;
 
         if (fees0ToSend > 0) {
             fees0 = 0;
-            // Send to VotingEscrow - fees become part of veBTB holder rewards
-            address ve = IPoolFactory(factory).voter(); // Voter knows the ve contract
-            IERC20(token0).safeTransfer(ve, fees0ToSend);
+            // Send to IInstantFeeDistributor for instant fee distribution
+            address feeDistributor = IPoolFactory(factory).voter();
+            IERC20(token0).safeTransfer(feeDistributor, fees0ToSend);
+            IInstantFeeDistributor(feeDistributor).collectFees(token0, fees0ToSend);
         }
 
         if (fees1ToSend > 0) {
             fees1 = 0;
-            address ve = IPoolFactory(factory).voter();
-            IERC20(token1).safeTransfer(ve, fees1ToSend);
+            address feeDistributor = IPoolFactory(factory).voter();
+            IERC20(token1).safeTransfer(feeDistributor, fees1ToSend);
+            IInstantFeeDistributor(feeDistributor).collectFees(token1, fees1ToSend);
         }
 
         emit FeesDistributed(fees0ToSend, fees1ToSend);

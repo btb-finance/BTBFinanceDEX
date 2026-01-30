@@ -116,15 +116,10 @@ interface IPoolCallee {
     function poolCall(address sender, uint256 amount0, uint256 amount1, bytes calldata data) external;
 }
 
-/// @title IFeeDistributor Interface
-/// @notice Interface for fee distributor that sends 100% of fees to veBTB holders
-interface IFeeDistributor {
-    /// @notice Collect fees from a pool
+/// @title IInstantFeeDistributor Interface
+/// @notice Interface for instant fee distribution to veBTB holders
+interface IInstantFeeDistributor {
     function collectFees(address token, uint256 amount) external;
-    
-    /// @notice Check claimable fees for a user
-    function claimable(address user, address token) external view returns (uint256);
-    
-    /// @notice Claim fees for a user
-    function claim(address token) external;
+    function getClaimable(address user, address token) external view returns (uint256);
+    function claimFees(address token) external;
 }
