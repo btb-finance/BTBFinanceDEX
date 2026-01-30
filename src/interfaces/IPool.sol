@@ -111,11 +111,10 @@ interface IPool {
 
     /// @notice Receive BTB rewards from voter when pool receives votes
     function notifyRewardAmount(uint256 amount) external;
+}
 
-    /// @notice Flash loan - borrow tokens without collateral, repay in same tx
-    /// @param token0Amount Amount of token0 to borrow (0 if only borrowing token1)
-    /// @param token1Amount Amount of token1 to borrow (0 if only borrowing token0)
-    /// @param receiver Address to receive the flash loan
-    /// @param data Arbitrary data to pass to receiver callback
-    function flash(uint256 token0Amount, uint256 token1Amount, address receiver, bytes calldata data) external;
+/// @title IPoolCallee Interface
+/// @notice Interface for contracts that can receive flash loans/swaps
+interface IPoolCallee {
+    function poolCall(address sender, uint256 amount0, uint256 amount1, bytes calldata data) external;
 }

@@ -273,8 +273,52 @@ contract Pool is IPool, ERC20Upgradeable, ReentrancyGuard {
         // Check slippage
         if (actualOutput < minOutput) revert SlippageExceeded();
         
-        // Execute normal swap
-        swap(amount0Out, amount1Out, to, data);
+        // Execute swap directly
+        _executeSwap(amount0Out, amount1Out, to, data);
+    }
+
+    /// @dev Internal swap implementation
+    function _executeSwap(
+        uint256 amount0Out,
+        uint256 amount1Out,
+        address to,
+        bytes calldata data
+    ) internal {
+        // Same implementation as swap() but internal
+        if (amount0Out == 0 && amount1Out == 0) revert InsufficientOutputAmount();
+        (uint112 _reserve0, uint112 _reserve1,) = getReserves();
+        if (amount0Out >= _reserve0 || amount1Out >= _reserve1) revert InsufficientLiquidity();
+        if (to == token0 || to == token1) revert InvalidTo();
+
+        if (amount0Out > 0) IERC20(token0).safeTransfer(to, amount0Out);
+        if (amount1Out > 0) IERC20(token1).safeTransfer(to, amount1Out);
+        if (data.length > 0) IPoolCallee(to).poolCall(msg.sender, amount0Out, amount1Out, data);
+
+        uint256 balance0 = IERC20(token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(token1).balanceOf(address(this));
+
+        uint256 amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
+        uint256 amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
+        if (amount0In == 0 && amount1In == 0) revert InsufficientInputAmount();
+
+        {
+            uint256 fee = IPoolFactory(factory).getFee(address(this), stable);
+            if (amount0In > 0) {
+                uint256 fee0 = (amount0In * fee) / 10_000;
+                fees0 += fee0;
+            }
+            if (amount1In > 0) {
+                uint256 fee1 = (amount1In * fee) / 10_000;
+                fees1 += fee1;
+            }
+        }
+
+        uint256 balance0Adjusted = balance0 - fees0;
+        uint256 balance1Adjusted = balance1 - fees1;
+        if (_k(balance0Adjusted, balance1Adjusted) < _k(_reserve0, _reserve1)) revert K();
+
+        _update(balance0, balance1, _reserve0, _reserve1);
+        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
     /*//////////////////////////////////////////////////////////////
